@@ -1,0 +1,130 @@
+import torch
+import soundfile
+import torchaudio
+import numpy as np
+
+# Parametri fissi
+TARGET_SAMPLE_RATE = 16000
+DURATA_TARGET_SECONDI = 1.0
+CAMPIONI_TARGET = int(TARGET_SAMPLE_RATE * DURATA_TARGET_SECONDI)
+
+
+def process_audio_file(percorso_file):
+
+    try:
+        # Lettura audio con soundfile
+        audio_array, sample_rate = soundfile.read(
+            percorso_file,
+            dtype="float32"
+        )
+
+        # Conversione NumPy -> Tensor
+        forma_onda = torch.from_numpy(audio_array)
+
+        # Mono
+        if forma_onda.ndim == 1:
+            forma_onda = forma_onda.unsqueeze(0)
+
+        # Stereo/multicanale
+        else:
+            forma_onda = forma_onda.transpose(0, 1)
+
+    except Exception as errore:
+        print(f"File inleggibile ignorato: {errore}")
+        return []
+
+    # Conversione in mono
+    if forma_onda.shape[0] > 1:
+        forma_onda = forma_onda.mean(
+            dim=0,
+            keepdim=True
+        )
+
+    # Ricampionamento
+    if sample_rate != TARGET_SAMPLE_RATE:
+
+        ricampionatore = torchaudio.transforms.Resample(
+            sample_rate,
+            TARGET_SAMPLE_RATE
+        )
+
+        forma_onda = ricampionatore(forma_onda)
+
+    num_campioni = forma_onda.shape[1]
+
+    lista_matrici = []
+
+    # Audio corto -> padding
+    if num_campioni < CAMPIONI_TARGET:
+
+        pad_dimensione = CAMPIONI_TARGET - num_campioni
+
+        forma_onda_paddata = torch.nn.functional.pad(
+            forma_onda,
+            (0, pad_dimensione)
+        )
+
+        matrice = estrai_spettrogramma(
+            forma_onda_paddata,
+            TARGET_SAMPLE_RATE
+        )
+
+        lista_matrici.append(matrice)
+
+    # Audio lungo -> chunking con padding sull'ultimo pezzetto avanzato
+    else:
+        passo = CAMPIONI_TARGET
+
+        # Scorriamo il file a blocchi regolari di 1 secondo (16000 campioni)
+        for inizio in range(0, num_campioni, passo):
+            fine = min(inizio + CAMPIONI_TARGET, num_campioni)
+            chunk = forma_onda[:, inizio:fine]
+
+            # Se il chunk è più corto del target (è l'ultimo pezzo del file), lo paddiamo con gli zeri
+            if chunk.shape[1] < CAMPIONI_TARGET:
+                pad_dimensione = CAMPIONI_TARGET - chunk.shape[1]
+                chunk = torch.nn.functional.pad(chunk, (0, pad_dimensione))
+
+            matrice = estrai_spettrogramma(
+                chunk,
+                TARGET_SAMPLE_RATE
+            )
+
+            lista_matrici.append(matrice)
+    return lista_matrici
+
+def estrai_spettrogramma(forma_onda, sample_rate):
+
+    trasformazione_mel = torchaudio.transforms.MelSpectrogram(
+        sample_rate=sample_rate,
+        n_fft=400,
+        hop_length=122,
+        n_mels=64,
+        center=False
+    )
+
+    spettrogramma = trasformazione_mel(forma_onda)
+
+    conversione_db = torchaudio.transforms.AmplitudeToDB(
+        stype="power"
+    )
+
+    spettrogramma = conversione_db(spettrogramma)
+
+    min_val = spettrogramma.min()
+    max_val = spettrogramma.max()
+    
+    # Evitiamo divisioni per zero se lo spettrogramma è completamente piatto
+    range_val = max_val - min_val
+    if range_val < 1e-6:
+        spettrogramma_norm = torch.zeros_like(spettrogramma)
+    else:
+        spettrogramma_norm = (spettrogramma - min_val) / range_val
+
+    return spettrogramma_norm
+
+
+# Esempio utilizzo
+# matrici = process_audio_file("audio.wav")
+# print("Numero matrici:", len(matrici))
+# print("Shape prima matrice:", matrici[0].shape)
